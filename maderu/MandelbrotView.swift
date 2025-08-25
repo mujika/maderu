@@ -54,7 +54,7 @@ struct MandelbrotView: NSViewRepresentable {
         private var time: Float = 0.0
         
         // Zoom state management
-        private var currentZoom: Float = 2.0
+        var currentZoom: Float = 2.0
         private var targetZoom: Float = 2.0
         private var centerX: Float = -0.5
         private var centerY: Float = 0.0
