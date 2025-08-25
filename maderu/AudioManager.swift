@@ -99,25 +99,30 @@ class AudioManager: NSObject, ObservableObject {
         
         var realp = [Float](repeating: 0, count: nOver2)
         var imagp = [Float](repeating: 0, count: nOver2)
-        var output = DSPSplitComplex(realp: &realp, imagp: &imagp)
         
-        samples.withUnsafeBufferPointer { samplesPtr in
-            samplesPtr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: n / 2) { complexPtr in
-                vDSP_ctoz(complexPtr, 2, &output, 1, vDSP_Length(nOver2))
+        return realp.withUnsafeMutableBufferPointer { realPtr in
+            return imagp.withUnsafeMutableBufferPointer { imagPtr in
+                var output = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+                
+                samples.withUnsafeBufferPointer { samplesPtr in
+                    samplesPtr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: n / 2) { complexPtr in
+                        vDSP_ctoz(complexPtr, 2, &output, 1, vDSP_Length(nOver2))
+                    }
+                }
+                
+                vDSP_fft_zrip(fftSetup, &output, 1, log2n, Int32(FFT_FORWARD))
+                
+                var magnitudes = [Float](repeating: 0, count: nOver2)
+                vDSP_zvmags(&output, 1, &magnitudes, 1, vDSP_Length(nOver2))
+                
+                var maxValue: Float = 0
+                var maxIndex: vDSP_Length = 0
+                vDSP_maxvi(magnitudes, 1, &maxValue, &maxIndex, vDSP_Length(nOver2))
+                
+                let dominantFrequency = Float(maxIndex) * sampleRate / Float(n)
+                return dominantFrequency
             }
         }
-        
-        vDSP_fft_zrip(fftSetup, &output, 1, log2n, Int32(FFT_FORWARD))
-        
-        var magnitudes = [Float](repeating: 0, count: nOver2)
-        vDSP_zvmags(&output, 1, &magnitudes, 1, vDSP_Length(nOver2))
-        
-        var maxValue: Float = 0
-        var maxIndex: vDSP_Length = 0
-        vDSP_maxvi(magnitudes, 1, &maxValue, &maxIndex, vDSP_Length(nOver2))
-        
-        let dominantFrequency = Float(maxIndex) * sampleRate / Float(n)
-        return dominantFrequency
     }
     
     func startRecording() {
