@@ -45,7 +45,11 @@ struct MandelbrotView: NSViewRepresentable {
     class Coordinator: NSObject, MTKViewDelegate {
         private var commandQueue: MTLCommandQueue?
         private var pipelineState: MTLComputePipelineState?
+        private var juliaSetPipelineState: MTLComputePipelineState?
+        private var compositePipelineState: MTLComputePipelineState?
         private var device: MTLDevice?
+        private var mandelbrotTexture: MTLTexture?
+        private var juliaTexture: MTLTexture?
         private var audioManager: AudioManager
         private var isMetalSetup = false
         
@@ -58,8 +62,12 @@ struct MandelbrotView: NSViewRepresentable {
         private var targetZoom: Float = 2.0
         private var centerX: Float = -0.5
         private var centerY: Float = 0.0
+        private var targetCenterX: Float = -0.5
+        private var targetCenterY: Float = 0.0
         private var autoZoomEnabled = true
         private var zoomSpeed: Float = 0.995
+        private var cameraEasing: Float = 0.02
+        private var zoomEasing: Float = 0.95
         
         // Interesting coordinates to explore
         private let presetCoordinates: [(x: Float, y: Float, name: String)] = [
@@ -116,40 +124,87 @@ struct MandelbrotView: NSViewRepresentable {
             }
             
             guard let commandQueue = commandQueue,
-                  let commandBuffer = commandQueue.makeCommandBuffer(),
-                  let commandEncoder = commandBuffer.makeComputeCommandEncoder(),
-                  let pipelineState = pipelineState else {
-                print("Metal components not ready")
+                  let commandBuffer = commandQueue.makeCommandBuffer() else {
+                print("Failed to create command buffer")
+                return
+            }
+            
+            // Create intermediate textures if needed
+            let textureDesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: drawable.texture.pixelFormat,
+                width: drawable.texture.width,
+                height: drawable.texture.height,
+                mipmapped: false
+            )
+            textureDesc.usage = [.shaderWrite, .shaderRead]
+            
+            if mandelbrotTexture?.width != drawable.texture.width || 
+               mandelbrotTexture?.height != drawable.texture.height {
+                mandelbrotTexture = device.makeTexture(descriptor: textureDesc)
+                juliaTexture = device.makeTexture(descriptor: textureDesc)
+            }
+            
+            guard let mandelbrotTex = mandelbrotTexture,
+                  let juliaTex = juliaTexture,
+                  let pipelineState = pipelineState,
+                  let juliaSetPipelineState = juliaSetPipelineState,
+                  let compositePipelineState = compositePipelineState else {
+                print("Metal textures or pipelines not ready")
                 return
             }
             
             time += 0.016
             
-            // Update zoom based on audio
+            // Update zoom and camera with smooth transitions
             if autoZoomEnabled {
                 let audioInfluence = amplitude * 0.5 + 0.5
-                zoomSpeed = 0.995 - (audioInfluence * 0.01)
-                currentZoom *= zoomSpeed
+                
+                // Dynamic zoom speed based on audio
+                zoomSpeed = 0.995 - (audioInfluence * 0.015)
+                targetZoom = currentZoom * zoomSpeed
+                
+                // Smooth zoom transition with easing
+                currentZoom = currentZoom * zoomEasing + targetZoom * (1.0 - zoomEasing)
                 
                 // Navigate to interesting points based on frequency
-                if frequency > 0.5 && Int.random(in: 0..<100) < 2 {
+                if frequency > 0.5 && Int.random(in: 0..<100) < 3 {
                     let preset = presetCoordinates[currentPresetIndex]
-                    centerX = centerX * 0.99 + preset.x * 0.01
-                    centerY = centerY * 0.99 + preset.y * 0.01
+                    targetCenterX = preset.x
+                    targetCenterY = preset.y
                     currentPresetIndex = (currentPresetIndex + 1) % presetCoordinates.count
+                    
+                    // Adjust easing speed for navigation
+                    cameraEasing = 0.008
+                } else {
+                    // Default easing speed
+                    cameraEasing = 0.02
                 }
                 
-                // Reset zoom if it gets too deep
+                // Smooth camera movement with easing
+                centerX += (targetCenterX - centerX) * cameraEasing
+                centerY += (targetCenterY - centerY) * cameraEasing
+                
+                // Audio-driven micro movements for liveliness
+                let microMovement = audioInfluence * currentZoom * 0.005
+                centerX += cos(time * 2.0 + frequency * 20.0) * microMovement
+                centerY += sin(time * 1.5 + frequency * 15.0) * microMovement
+                
+                // Reset zoom if it gets too deep with smooth transition
                 if currentZoom < 1e-15 {
-                    currentZoom = 2.0
                     let preset = presetCoordinates[Int.random(in: 0..<presetCoordinates.count)]
-                    centerX = preset.x
-                    centerY = preset.y
+                    currentZoom = 2.0
+                    targetZoom = 2.0
+                    targetCenterX = preset.x
+                    targetCenterY = preset.y
+                    cameraEasing = 0.05  // Faster transition for reset
                 }
             }
             
-            commandEncoder.setComputePipelineState(pipelineState)
-            commandEncoder.setTexture(drawable.texture, index: 0)
+            // Generate dynamic Julia set parameters
+            let juliaReal = cos(time * 0.1 + frequency * 5.0) * 0.8
+            let juliaImag = sin(time * 0.15 + frequency * 3.0) * 0.8
+            let layerMix = amplitude * 0.7 + 0.3
+            let complexity = currentZoom < 0.1 ? log10(2.0 / currentZoom) / 15.0 : 0.0
             
             var params = MandelbrotParams(
                 width: Float(drawable.texture.width),
@@ -159,10 +214,12 @@ struct MandelbrotView: NSViewRepresentable {
                 time: time,
                 centerX: centerX,
                 centerY: centerY,
-                zoomLevel: currentZoom
+                zoomLevel: currentZoom,
+                juliaReal: juliaReal,
+                juliaImag: juliaImag,
+                layerMix: layerMix,
+                complexity: complexity
             )
-            
-            commandEncoder.setBytes(&params, length: MemoryLayout<MandelbrotParams>.size, index: 0)
             
             let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
             let threadgroupCount = MTLSize(
@@ -171,8 +228,31 @@ struct MandelbrotView: NSViewRepresentable {
                 depth: 1
             )
             
-            commandEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
-            commandEncoder.endEncoding()
+            // Step 1: Render Julia set to background texture
+            guard let juliaEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            juliaEncoder.setComputePipelineState(juliaSetPipelineState)
+            juliaEncoder.setTexture(juliaTex, index: 0)
+            juliaEncoder.setBytes(&params, length: MemoryLayout<MandelbrotParams>.size, index: 0)
+            juliaEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
+            juliaEncoder.endEncoding()
+            
+            // Step 2: Render Mandelbrot set to main texture
+            guard let mandelbrotEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            mandelbrotEncoder.setComputePipelineState(pipelineState)
+            mandelbrotEncoder.setTexture(mandelbrotTex, index: 0)
+            mandelbrotEncoder.setBytes(&params, length: MemoryLayout<MandelbrotParams>.size, index: 0)
+            mandelbrotEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
+            mandelbrotEncoder.endEncoding()
+            
+            // Step 3: Composite layers to final output
+            guard let compositeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            compositeEncoder.setComputePipelineState(compositePipelineState)
+            compositeEncoder.setTexture(mandelbrotTex, index: 0)
+            compositeEncoder.setTexture(juliaTex, index: 1)
+            compositeEncoder.setTexture(drawable.texture, index: 2)
+            compositeEncoder.setBytes(&params, length: MemoryLayout<MandelbrotParams>.size, index: 0)
+            compositeEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
+            compositeEncoder.endEncoding()
             
             commandBuffer.present(drawable)
             commandBuffer.commit()
@@ -199,12 +279,47 @@ struct MandelbrotView: NSViewRepresentable {
                 float centerX;
                 float centerY;
                 float zoomLevel;
+                float juliaReal;
+                float juliaImag;
+                float layerMix;
+                float complexity;
             };
             
             float3 hsv2rgb(float3 c) {
                 float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
                 float3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
                 return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+            }
+            
+            float calculateComplexity(float2 z, int iterations, int maxIterations) {
+                float smoothIterations = float(iterations) + 1.0 - log2(log2(length(z)));
+                float normalizedIter = smoothIterations / float(maxIterations);
+                
+                // Calculate fractal dimension approximation
+                float dimension = 1.0 + (1.0 - normalizedIter) * 0.5;
+                return dimension;
+            }
+            
+            float3 getEnhancedColor(float value, float complexity, constant MandelbrotParams& params, float2 position) {
+                float audioMod = params.amplitude * 0.5 + 0.5;
+                
+                // Multiple color layers based on complexity
+                float zoomColorShift = log10(max(2.0 / params.zoomLevel, 1.0)) * 30.0;
+                
+                // Base color
+                float hue1 = value * 360.0 + params.time * 30.0 + params.frequency * 100.0 + zoomColorShift;
+                float3 color1 = hsv2rgb(float3(hue1 / 360.0, 0.8 + audioMod * 0.2, value > 0.99 ? 0.0 : 0.8 + audioMod * 0.2));
+                
+                // Complexity-based overlay
+                float hue2 = complexity * 180.0 + params.time * 50.0;
+                float3 color2 = hsv2rgb(float3(hue2 / 360.0, 0.6, complexity * 0.5));
+                
+                // Distance-based shimmer
+                float dist = length(position - float2(params.centerX, params.centerY));
+                float shimmer = sin(dist * params.zoomLevel * 100.0 + params.time * 10.0) * 0.1 + 0.9;
+                
+                float3 finalColor = mix(color1, color2, complexity * 0.3) * shimmer;
+                return pow(finalColor, 1.0 / 2.2);
             }
             
             kernel void mandelbrotShader(texture2d<float, access::write> output [[texture(0)]],
@@ -253,30 +368,108 @@ struct MandelbrotView: NSViewRepresentable {
                 }
                 
                 float value = float(iterations) / float(maxIterations);
+                float complexity = calculateComplexity(z, iterations, maxIterations);
                 
-                // Enhanced coloring based on zoom level
-                float zoomColorShift = log10(max(2.0 / params.zoomLevel, 1.0)) * 30.0;
-                float hue = value * 360.0 + params.time * 30.0 + params.frequency * 100.0 + zoomColorShift;
-                float saturation = 0.8 + audioMod * 0.2;
-                float brightness = value > 0.99 ? 0.0 : 0.8 + audioMod * 0.2;
-                
-                float3 color = hsv2rgb(float3(hue / 360.0, saturation, brightness));
-                
-                color = pow(color, 1.0 / 2.2);
+                // Enhanced multi-layer coloring
+                float3 color = getEnhancedColor(value, complexity, params, c);
                 
                 output.write(float4(color, 1.0), gid);
+            }
+            
+            // Julia Set shader for background layer
+            kernel void juliaShader(texture2d<float, access::write> output [[texture(0)]],
+                                   constant MandelbrotParams& params [[buffer(0)]],
+                                   uint2 gid [[thread_position_in_grid]]) {
+                if (gid.x >= output.get_width() || gid.y >= output.get_height()) {
+                    return;
+                }
+                
+                float2 resolution = float2(params.width, params.height);
+                float2 uv = (float2(gid) - 0.5 * resolution) / min(resolution.x, resolution.y);
+                
+                float audioMod = params.amplitude * 0.5 + 0.5;
+                
+                // Julia set calculation
+                float2 z = uv * (params.zoomLevel * 0.5);
+                float2 c = float2(params.juliaReal, params.juliaImag);
+                
+                int iterations = 0;
+                int maxIterations = 128;
+                
+                for (int i = 0; i < maxIterations; i++) {
+                    float x = z.x * z.x - z.y * z.y + c.x;
+                    float y = 2.0 * z.x * z.y + c.y;
+                    z = float2(x, y);
+                    
+                    if (length(z) > 2.0) {
+                        break;
+                    }
+                    iterations++;
+                }
+                
+                float value = float(iterations) / float(maxIterations);
+                
+                // Soft, ethereal colors for background
+                float hue = value * 240.0 + params.time * 10.0 + params.frequency * 50.0;
+                float3 juliaColor = hsv2rgb(float3(hue / 360.0, 0.3 + audioMod * 0.2, 0.4 + value * 0.3));
+                
+                output.write(float4(juliaColor * 0.5, 0.5), gid);
+            }
+            
+            // Composite shader for blending layers
+            kernel void compositeShader(texture2d<float, access::read> mandelbrotTex [[texture(0)]],
+                                      texture2d<float, access::read> juliaTex [[texture(1)]],
+                                      texture2d<float, access::write> output [[texture(2)]],
+                                      constant MandelbrotParams& params [[buffer(0)]],
+                                      uint2 gid [[thread_position_in_grid]]) {
+                if (gid.x >= output.get_width() || gid.y >= output.get_height()) {
+                    return;
+                }
+                
+                float4 mandelbrotColor = mandelbrotTex.read(gid);
+                float4 juliaColor = juliaTex.read(gid);
+                
+                // Dynamic blending based on zoom and audio
+                float audioMod = params.amplitude * 0.5 + 0.5;
+                float zoomFactor = log10(max(2.0 / params.zoomLevel, 1.0)) / 15.0;
+                float blendFactor = params.layerMix * (0.3 + zoomFactor * 0.4 + audioMod * 0.3);
+                
+                // Enhanced blending with depth
+                float3 finalColor = mix(juliaColor.rgb, mandelbrotColor.rgb, 1.0 - blendFactor);
+                
+                // Add depth-based brightness adjustment
+                finalColor *= 1.0 + zoomFactor * 0.5;
+                
+                output.write(float4(finalColor, 1.0), gid);
             }
             """
             
             do {
                 let library = try device.makeLibrary(source: metalCode, options: nil)
-                guard let function = library.makeFunction(name: "mandelbrotShader") else {
+                
+                // Create Mandelbrot shader
+                guard let mandelbrotFunction = library.makeFunction(name: "mandelbrotShader") else {
                     print("Failed to find mandelbrotShader function")
                     return
                 }
-                pipelineState = try device.makeComputePipelineState(function: function)
+                pipelineState = try device.makeComputePipelineState(function: mandelbrotFunction)
+                
+                // Create Julia Set shader
+                guard let juliaFunction = library.makeFunction(name: "juliaShader") else {
+                    print("Failed to find juliaShader function")
+                    return
+                }
+                juliaSetPipelineState = try device.makeComputePipelineState(function: juliaFunction)
+                
+                // Create Composite shader
+                guard let compositeFunction = library.makeFunction(name: "compositeShader") else {
+                    print("Failed to find compositeShader function")
+                    return
+                }
+                compositePipelineState = try device.makeComputePipelineState(function: compositeFunction)
+                
                 isMetalSetup = true
-                print("Metal pipeline created successfully")
+                print("Multi-layer Metal pipeline created successfully")
             } catch {
                 print("Error creating Metal pipeline: \(error)")
                 isMetalSetup = false
@@ -294,4 +487,8 @@ struct MandelbrotParams {
     var centerX: Float
     var centerY: Float
     var zoomLevel: Float
+    var juliaReal: Float
+    var juliaImag: Float
+    var layerMix: Float
+    var complexity: Float
 }
