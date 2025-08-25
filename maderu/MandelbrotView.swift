@@ -4,6 +4,8 @@ import Metal
 
 struct MandelbrotView: NSViewRepresentable {
     @ObservedObject var audioManager: AudioManager
+    @Binding var zoomLevel: Float
+    @Binding var currentLocation: String
     
     func makeNSView(context: Context) -> MTKView {
         let metalView = MTKView()
@@ -30,6 +32,10 @@ struct MandelbrotView: NSViewRepresentable {
     func updateNSView(_ nsView: MTKView, context: Context) {
         context.coordinator.amplitude = audioManager.amplitude
         context.coordinator.frequency = audioManager.frequency
+        DispatchQueue.main.async {
+            self.zoomLevel = context.coordinator.currentZoom
+            self.currentLocation = context.coordinator.getCurrentLocationName()
+        }
     }
     
     func makeCoordinator() -> Coordinator {
@@ -46,6 +52,49 @@ struct MandelbrotView: NSViewRepresentable {
         var amplitude: Float = 0.0
         var frequency: Float = 0.0
         private var time: Float = 0.0
+        
+        // Zoom state management
+        private var currentZoom: Float = 2.0
+        private var targetZoom: Float = 2.0
+        private var centerX: Float = -0.5
+        private var centerY: Float = 0.0
+        private var autoZoomEnabled = true
+        private var zoomSpeed: Float = 0.995
+        
+        // Interesting coordinates to explore
+        private let presetCoordinates: [(x: Float, y: Float, name: String)] = [
+            (-0.7269, 0.1889, "Seahorse Valley"),
+            (-0.8, 0.156, "Elephant Valley"),
+            (-0.74529, 0.11307, "Triple Spiral"),
+            (-1.25066, 0.02012, "Miniature Mandelbrot"),
+            (-0.7533, 0.1138, "Dragon Valley"),
+            (0.274, 0.482, "Feather"),
+            (-0.835, -0.2321, "Tendrils"),
+            (-0.74591, 0.11254, "Star")
+        ]
+        private var currentPresetIndex = 0
+        private var lastVisitedPreset = ""
+        
+        func getCurrentLocationName() -> String {
+            // Find the closest preset location
+            var minDistance: Float = Float.greatestFiniteMagnitude
+            var closestPreset = "Exploring..."
+            
+            for preset in presetCoordinates {
+                let distance = sqrt(pow(centerX - preset.x, 2) + pow(centerY - preset.y, 2))
+                if distance < minDistance {
+                    minDistance = distance
+                    closestPreset = preset.name
+                }
+            }
+            
+            if minDistance < 0.1 {
+                lastVisitedPreset = closestPreset
+                return closestPreset
+            }
+            
+            return lastVisitedPreset.isEmpty ? "Exploring..." : "Near \(lastVisitedPreset)"
+        }
         
         init(audioManager: AudioManager) {
             self.audioManager = audioManager
@@ -76,6 +125,29 @@ struct MandelbrotView: NSViewRepresentable {
             
             time += 0.016
             
+            // Update zoom based on audio
+            if autoZoomEnabled {
+                let audioInfluence = amplitude * 0.5 + 0.5
+                zoomSpeed = 0.995 - (audioInfluence * 0.01)
+                currentZoom *= zoomSpeed
+                
+                // Navigate to interesting points based on frequency
+                if frequency > 0.5 && Int.random(in: 0..<100) < 2 {
+                    let preset = presetCoordinates[currentPresetIndex]
+                    centerX = centerX * 0.99 + preset.x * 0.01
+                    centerY = centerY * 0.99 + preset.y * 0.01
+                    currentPresetIndex = (currentPresetIndex + 1) % presetCoordinates.count
+                }
+                
+                // Reset zoom if it gets too deep
+                if currentZoom < 1e-15 {
+                    currentZoom = 2.0
+                    let preset = presetCoordinates[Int.random(in: 0..<presetCoordinates.count)]
+                    centerX = preset.x
+                    centerY = preset.y
+                }
+            }
+            
             commandEncoder.setComputePipelineState(pipelineState)
             commandEncoder.setTexture(drawable.texture, index: 0)
             
@@ -84,7 +156,10 @@ struct MandelbrotView: NSViewRepresentable {
                 height: Float(drawable.texture.height),
                 amplitude: amplitude,
                 frequency: frequency,
-                time: time
+                time: time,
+                centerX: centerX,
+                centerY: centerY,
+                zoomLevel: currentZoom
             )
             
             commandEncoder.setBytes(&params, length: MemoryLayout<MandelbrotParams>.size, index: 0)
@@ -121,6 +196,9 @@ struct MandelbrotView: NSViewRepresentable {
                 float amplitude;
                 float frequency;
                 float time;
+                float centerX;
+                float centerY;
+                float zoomLevel;
             };
             
             float3 hsv2rgb(float3 c) {
@@ -140,21 +218,27 @@ struct MandelbrotView: NSViewRepresentable {
                 float2 uv = (float2(gid) - 0.5 * resolution) / min(resolution.x, resolution.y);
                 
                 float audioMod = params.amplitude * 0.5 + 0.5;
-                float freqMod = params.frequency * 0.1;
                 
-                float zoom = 2.0 + sin(params.time * 0.5 + freqMod) * audioMod;
-                float2 c = uv * zoom;
+                // Apply zoom and center transformation
+                float2 c = uv * params.zoomLevel;
+                c.x += params.centerX;
+                c.y += params.centerY;
                 
-                c.x += cos(params.time * 0.3 + params.frequency * 10.0) * audioMod * 0.5;
-                c.y += sin(params.time * 0.2 + params.frequency * 5.0) * audioMod * 0.5;
+                // Add slight audio-driven wobble
+                c.x += cos(params.time * 0.3 + params.frequency * 10.0) * audioMod * params.zoomLevel * 0.01;
+                c.y += sin(params.time * 0.2 + params.frequency * 5.0) * audioMod * params.zoomLevel * 0.01;
                 
                 float2 z = float2(0.0, 0.0);
                 int iterations = 0;
-                int maxIterations = int(100.0 + audioMod * 150.0);
                 
-                float escape = 4.0 + audioMod * 2.0;
+                // Increase iterations for deeper zooms
+                int baseIterations = 256;
+                float zoomFactor = log10(max(2.0 / params.zoomLevel, 1.0));
+                int maxIterations = int(baseIterations + zoomFactor * 100.0 + audioMod * 50.0);
                 
-                for (int i = 0; i < 256; i++) {
+                float escape = 4.0;
+                
+                for (int i = 0; i < 1024; i++) {
                     if (i >= maxIterations) break;
                     
                     float x = z.x * z.x - z.y * z.y + c.x;
@@ -170,7 +254,9 @@ struct MandelbrotView: NSViewRepresentable {
                 
                 float value = float(iterations) / float(maxIterations);
                 
-                float hue = value * 360.0 + params.time * 30.0 + params.frequency * 100.0;
+                // Enhanced coloring based on zoom level
+                float zoomColorShift = log10(max(2.0 / params.zoomLevel, 1.0)) * 30.0;
+                float hue = value * 360.0 + params.time * 30.0 + params.frequency * 100.0 + zoomColorShift;
                 float saturation = 0.8 + audioMod * 0.2;
                 float brightness = value > 0.99 ? 0.0 : 0.8 + audioMod * 0.2;
                 
@@ -205,4 +291,7 @@ struct MandelbrotParams {
     var amplitude: Float
     var frequency: Float
     var time: Float
+    var centerX: Float
+    var centerY: Float
+    var zoomLevel: Float
 }
