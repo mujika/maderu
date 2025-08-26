@@ -32,6 +32,10 @@ struct MandelbrotView: NSViewRepresentable {
     func updateNSView(_ nsView: MTKView, context: Context) {
         context.coordinator.amplitude = audioManager.amplitude
         context.coordinator.frequency = audioManager.frequency
+        context.coordinator.bassEnergy = audioManager.bassEnergy
+        context.coordinator.midEnergy = audioManager.midEnergy
+        context.coordinator.highEnergy = audioManager.highEnergy
+        context.coordinator.spectrumData = audioManager.spectrumData
         DispatchQueue.main.async {
             self.zoomLevel = context.coordinator.currentZoom
             self.currentLocation = context.coordinator.getCurrentLocationName()
@@ -55,6 +59,10 @@ struct MandelbrotView: NSViewRepresentable {
         
         var amplitude: Float = 0.0
         var frequency: Float = 0.0
+        var bassEnergy: Float = 0.0
+        var midEnergy: Float = 0.0
+        var highEnergy: Float = 0.0
+        var spectrumData: [Float] = Array(repeating: 0, count: 8)
         private var time: Float = 0.0
         
         // Zoom state management
@@ -218,7 +226,18 @@ struct MandelbrotView: NSViewRepresentable {
                 juliaReal: juliaReal,
                 juliaImag: juliaImag,
                 layerMix: layerMix,
-                complexity: complexity
+                complexity: complexity,
+                bassEnergy: bassEnergy,
+                midEnergy: midEnergy,
+                highEnergy: highEnergy,
+                spectrum0: spectrumData[safe: 0] ?? 0,
+                spectrum1: spectrumData[safe: 1] ?? 0,
+                spectrum2: spectrumData[safe: 2] ?? 0,
+                spectrum3: spectrumData[safe: 3] ?? 0,
+                spectrum4: spectrumData[safe: 4] ?? 0,
+                spectrum5: spectrumData[safe: 5] ?? 0,
+                spectrum6: spectrumData[safe: 6] ?? 0,
+                spectrum7: spectrumData[safe: 7] ?? 0
             )
             
             let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
@@ -283,6 +302,10 @@ struct MandelbrotView: NSViewRepresentable {
                 float juliaImag;
                 float layerMix;
                 float complexity;
+                float bassEnergy;
+                float midEnergy;
+                float highEnergy;
+                float spectrum[8];
             };
             
             float3 hsv2rgb(float3 c) {
@@ -326,9 +349,10 @@ struct MandelbrotView: NSViewRepresentable {
                 // Multiple color layers based on complexity
                 float zoomColorShift = log10(max(2.0 / params.zoomLevel, 1.0)) * 30.0;
                 
-                // Base color - never go completely black
-                float hue1 = value * 360.0 + params.time * 30.0 + params.frequency * 100.0 + zoomColorShift;
-                float baseBrightness = 0.3 + (0.5 + audioMod * 0.2) * (1.0 - value);
+                // Base color - modulated by frequency bands
+                float spectrumColorShift = params.spectrum[0] * 20.0 + params.spectrum[4] * 30.0 + params.spectrum[7] * 40.0;
+                float hue1 = value * 360.0 + params.time * 30.0 + params.frequency * 100.0 + zoomColorShift + spectrumColorShift;
+                float baseBrightness = 0.3 + (0.5 + audioMod * 0.2) * (1.0 - value) + params.highEnergy * 0.2;
                 float3 color1 = hsv2rgb(float3(hue1 / 360.0, 0.8 + audioMod * 0.2, baseBrightness));
                 
                 // Orbit trap based coloring for interior detail
@@ -349,9 +373,9 @@ struct MandelbrotView: NSViewRepresentable {
                 float noise2 = cos(position.x * 73.0 - params.time * 4.2) * cos(position.y * 67.0 + params.time * 6.1);
                 float dynamicNoise = (noise1 + noise2) * 0.1 + 0.9;
                 
-                // Audio-driven particle-like effects
+                // Frequency-band driven particle effects
                 float particleEffect = 0.0;
-                if (audioMod > 0.6) {
+                if (params.highEnergy > 0.5) {
                     float particleX = position.x + sin(params.time * 8.0 + params.frequency * 30.0) * 0.1;
                     float particleY = position.y + cos(params.time * 6.0 + params.frequency * 25.0) * 0.1;
                     float particleDist = length(float2(particleX, particleY));
@@ -393,10 +417,10 @@ struct MandelbrotView: NSViewRepresentable {
                 float2 z = float2(0.0, 0.0);
                 int iterations = 0;
                 
-                // Increase iterations for deeper zooms
+                // Increase iterations based on zoom and bass energy
                 int baseIterations = 256;
                 float zoomFactor = log10(max(2.0 / params.zoomLevel, 1.0));
-                int maxIterations = int(baseIterations + zoomFactor * 100.0 + audioMod * 50.0);
+                int maxIterations = int(baseIterations + zoomFactor * 100.0 + audioMod * 50.0 + params.bassEnergy * 100.0);
                 
                 float escape = 4.0;
                 
@@ -576,4 +600,22 @@ struct MandelbrotParams {
     var juliaImag: Float
     var layerMix: Float
     var complexity: Float
+    var bassEnergy: Float
+    var midEnergy: Float
+    var highEnergy: Float
+    var spectrum0: Float
+    var spectrum1: Float
+    var spectrum2: Float
+    var spectrum3: Float
+    var spectrum4: Float
+    var spectrum5: Float
+    var spectrum6: Float
+    var spectrum7: Float
+}
+
+// Safe array access extension
+extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
 }

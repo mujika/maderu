@@ -87,6 +87,11 @@ struct ContentView: View {
                 .cornerRadius(12)
                 
                 Spacer()
+                
+                // Spectrum analyzer at the bottom
+                SpectrumView(audioManager: audioManager)
+                    .frame(maxWidth: 300)
+                    .padding(.bottom, 20)
             }
             .padding()
         }
