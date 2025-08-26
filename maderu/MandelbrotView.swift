@@ -300,25 +300,72 @@ struct MandelbrotView: NSViewRepresentable {
                 return dimension;
             }
             
-            float3 getEnhancedColor(float value, float complexity, constant MandelbrotParams& params, float2 position) {
+            // Orbit trap functions for interior detail
+            float circularTrap(float2 z, float radius) {
+                return abs(length(z) - radius);
+            }
+            
+            float lineTrap(float2 z) {
+                return abs(z.y);  // Distance to x-axis
+            }
+            
+            float crossTrap(float2 z) {
+                return min(abs(z.x), abs(z.y));
+            }
+            
+            float spiralTrap(float2 z, float params_time) {
+                float angle = atan2(z.y, z.x);
+                float radius = length(z);
+                float spiral = radius - 0.1 * (angle + params_time);
+                return abs(fmod(spiral, 0.2) - 0.1);
+            }
+            
+            float3 getEnhancedColor(float value, float complexity, constant MandelbrotParams& params, float2 position, float orbitTrapValue) {
                 float audioMod = params.amplitude * 0.5 + 0.5;
                 
                 // Multiple color layers based on complexity
                 float zoomColorShift = log10(max(2.0 / params.zoomLevel, 1.0)) * 30.0;
                 
-                // Base color
+                // Base color - never go completely black
                 float hue1 = value * 360.0 + params.time * 30.0 + params.frequency * 100.0 + zoomColorShift;
-                float3 color1 = hsv2rgb(float3(hue1 / 360.0, 0.8 + audioMod * 0.2, value > 0.99 ? 0.0 : 0.8 + audioMod * 0.2));
+                float baseBrightness = 0.3 + (0.5 + audioMod * 0.2) * (1.0 - value);
+                float3 color1 = hsv2rgb(float3(hue1 / 360.0, 0.8 + audioMod * 0.2, baseBrightness));
                 
-                // Complexity-based overlay
-                float hue2 = complexity * 180.0 + params.time * 50.0;
-                float3 color2 = hsv2rgb(float3(hue2 / 360.0, 0.6, complexity * 0.5));
+                // Orbit trap based coloring for interior detail
+                float trapInfluence = 1.0 / (1.0 + orbitTrapValue * 10.0);
+                float hue2 = complexity * 180.0 + params.time * 50.0 + trapInfluence * 120.0;
+                float3 color2 = hsv2rgb(float3(hue2 / 360.0, 0.6 + trapInfluence * 0.3, 0.4 + complexity * 0.4));
+                
+                // Orbit trap highlight color
+                float trapHue = orbitTrapValue * 300.0 + params.time * 80.0 + params.frequency * 200.0;
+                float3 trapColor = hsv2rgb(float3(trapHue / 360.0, 0.9, 0.8 + audioMod * 0.2));
                 
                 // Distance-based shimmer
                 float dist = length(position - float2(params.centerX, params.centerY));
                 float shimmer = sin(dist * params.zoomLevel * 100.0 + params.time * 10.0) * 0.1 + 0.9;
                 
-                float3 finalColor = mix(color1, color2, complexity * 0.3) * shimmer;
+                // Dynamic noise pattern for interior
+                float noise1 = sin(position.x * 50.0 + params.time * 5.0) * sin(position.y * 47.0 + params.time * 3.7);
+                float noise2 = cos(position.x * 73.0 - params.time * 4.2) * cos(position.y * 67.0 + params.time * 6.1);
+                float dynamicNoise = (noise1 + noise2) * 0.1 + 0.9;
+                
+                // Audio-driven particle-like effects
+                float particleEffect = 0.0;
+                if (audioMod > 0.6) {
+                    float particleX = position.x + sin(params.time * 8.0 + params.frequency * 30.0) * 0.1;
+                    float particleY = position.y + cos(params.time * 6.0 + params.frequency * 25.0) * 0.1;
+                    float particleDist = length(float2(particleX, particleY));
+                    particleEffect = exp(-particleDist * 20.0) * audioMod * 0.3;
+                }
+                
+                // Blend all color layers
+                float3 baseColor = mix(color1, color2, complexity * 0.3);
+                float3 finalColor = mix(baseColor, trapColor, trapInfluence * 0.4) * shimmer * dynamicNoise;
+                
+                // Add particle highlights
+                float3 particleColor = float3(1.0, 0.8, 0.4) * particleEffect;
+                finalColor += particleColor;
+                
                 return pow(finalColor, 1.0 / 2.2);
             }
             
@@ -353,8 +400,32 @@ struct MandelbrotView: NSViewRepresentable {
                 
                 float escape = 4.0;
                 
+                // Orbit trap variables
+                float minTrapDistance = 1000.0;
+                float trapRadius = 0.5 + audioMod * 0.3;
+                
                 for (int i = 0; i < 1024; i++) {
                     if (i >= maxIterations) break;
+                    
+                    // Calculate orbit traps during iteration
+                    float circDist = circularTrap(z, trapRadius);
+                    float lineDist = lineTrap(z);
+                    float crossDist = crossTrap(z);
+                    float spiralDist = spiralTrap(z, params.time);
+                    
+                    // Choose trap based on audio frequency
+                    float trapDist;
+                    if (params.frequency < 0.25) {
+                        trapDist = circDist;
+                    } else if (params.frequency < 0.5) {
+                        trapDist = lineDist;
+                    } else if (params.frequency < 0.75) {
+                        trapDist = crossDist;
+                    } else {
+                        trapDist = spiralDist;
+                    }
+                    
+                    minTrapDistance = min(minTrapDistance, trapDist);
                     
                     float x = z.x * z.x - z.y * z.y + c.x;
                     float y = 2.0 * z.x * z.y + c.y;
@@ -370,8 +441,8 @@ struct MandelbrotView: NSViewRepresentable {
                 float value = float(iterations) / float(maxIterations);
                 float complexity = calculateComplexity(z, iterations, maxIterations);
                 
-                // Enhanced multi-layer coloring
-                float3 color = getEnhancedColor(value, complexity, params, c);
+                // Enhanced multi-layer coloring with orbit trap
+                float3 color = getEnhancedColor(value, complexity, params, c, minTrapDistance);
                 
                 output.write(float4(color, 1.0), gid);
             }
@@ -396,7 +467,15 @@ struct MandelbrotView: NSViewRepresentable {
                 int iterations = 0;
                 int maxIterations = 128;
                 
+                // Orbit trap for Julia set
+                float minTrapDistance = 1000.0;
+                float trapRadius = 0.3 + audioMod * 0.2;
+                
                 for (int i = 0; i < maxIterations; i++) {
+                    // Calculate orbit trap
+                    float trapDist = circularTrap(z, trapRadius);
+                    minTrapDistance = min(minTrapDistance, trapDist);
+                    
                     float x = z.x * z.x - z.y * z.y + c.x;
                     float y = 2.0 * z.x * z.y + c.y;
                     z = float2(x, y);
@@ -408,10 +487,16 @@ struct MandelbrotView: NSViewRepresentable {
                 }
                 
                 float value = float(iterations) / float(maxIterations);
+                float trapInfluence = 1.0 / (1.0 + minTrapDistance * 8.0);
                 
-                // Soft, ethereal colors for background
-                float hue = value * 240.0 + params.time * 10.0 + params.frequency * 50.0;
-                float3 juliaColor = hsv2rgb(float3(hue / 360.0, 0.3 + audioMod * 0.2, 0.4 + value * 0.3));
+                // Enhanced ethereal colors with interior detail
+                float hue = value * 240.0 + params.time * 10.0 + params.frequency * 50.0 + trapInfluence * 60.0;
+                float brightness = 0.2 + value * 0.4 + trapInfluence * 0.3;
+                
+                // Add subtle noise pattern
+                float noise = sin(uv.x * 30.0 + params.time * 2.0) * cos(uv.y * 25.0 - params.time * 1.5) * 0.05 + 0.95;
+                
+                float3 juliaColor = hsv2rgb(float3(hue / 360.0, 0.3 + audioMod * 0.2 + trapInfluence * 0.2, brightness)) * noise;
                 
                 output.write(float4(juliaColor * 0.5, 0.5), gid);
             }
