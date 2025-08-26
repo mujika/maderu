@@ -148,13 +148,6 @@ struct EnergyIndicator: View {
     }
 }
 
-// Safe array access extension
-extension Array {
-    subscript(safe index: Index) -> Element? {
-        indices.contains(index) ? self[index] : nil
-    }
-}
-
 struct SpectrumView_Previews: PreviewProvider {
     static var previews: some View {
         SpectrumView(audioManager: AudioManager())
