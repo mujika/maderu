@@ -15,47 +15,60 @@ struct SpectrumView: View {
         .pink
     ]
     
+    @ViewBuilder
+    private func spectrumBarView(for index: Int) -> some View {
+        let spectrumValue: CGFloat = {
+            if index < audioManager.spectrumData.count {
+                return CGFloat(audioManager.spectrumData[index])
+            } else {
+                return 0.0
+            }
+        }()
+        
+        let barColor = bandColors[index]
+        let barHeight = spectrumValue * 80
+        
+        VStack(spacing: 2) {
+            Spacer()
+            
+            // Bar visualization
+            RoundedRectangle(cornerRadius: 2)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            barColor.opacity(0.3),
+                            barColor,
+                            barColor.opacity(0.8)
+                        ],
+                        startPoint: .bottom,
+                        endPoint: .top
+                    )
+                )
+                .frame(width: 25, height: barHeight)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(barColor.opacity(0.5), lineWidth: 1)
+                )
+                .shadow(
+                    color: barColor.opacity(Double(spectrumValue)),
+                    radius: 4
+                )
+                .animation(.spring(response: 0.1, dampingFraction: 0.7), value: spectrumValue)
+            
+            // Band label
+            Text(bandNames[index])
+                .font(.system(size: 8, weight: .medium))
+                .foregroundColor(.white.opacity(0.6))
+        }
+        .frame(height: 100)
+    }
+    
     var body: some View {
         VStack(spacing: 4) {
             // Main spectrum display
             HStack(spacing: 3) {
                 ForEach(0..<8) { index in
-                    VStack(spacing: 2) {
-                        Spacer()
-                        
-                        // Bar visualization
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        bandColors[index].opacity(0.3),
-                                        bandColors[index],
-                                        bandColors[index].opacity(0.8)
-                                    ],
-                                    startPoint: .bottom,
-                                    endPoint: .top
-                                )
-                            )
-                            .frame(
-                                width: 25,
-                                height: CGFloat(audioManager.spectrumData[safe: index] ?? 0) * 80
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 2)
-                                    .stroke(bandColors[index].opacity(0.5), lineWidth: 1)
-                            )
-                            .shadow(
-                                color: bandColors[index].opacity(audioManager.spectrumData[safe: index] ?? 0),
-                                radius: 4
-                            )
-                            .animation(.spring(response: 0.1, dampingFraction: 0.7), value: audioManager.spectrumData[safe: index] ?? 0)
-                        
-                        // Band label
-                        Text(bandNames[index])
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundColor(.white.opacity(0.6))
-                    }
-                    .frame(height: 100)
+                    spectrumBarView(for: index)
                 }
             }
             .padding(.horizontal, 8)
