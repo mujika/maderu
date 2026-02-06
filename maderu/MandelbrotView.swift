@@ -345,15 +345,16 @@ struct MandelbrotView: NSViewRepresentable {
             
             float3 getEnhancedColor(float value, float complexity, constant MandelbrotParams& params, float2 position, float orbitTrapValue) {
                 float audioMod = params.amplitude * 0.5 + 0.5;
-                
+                float edgeFactor = pow(value, 0.5);
+
                 // Multiple color layers based on complexity
                 float zoomColorShift = log10(max(2.0 / params.zoomLevel, 1.0)) * 30.0;
-                
-                // Base color - modulated by frequency bands
+
+                // Base color - modulated by boundary detail and frequency bands
                 float spectrumColorShift = params.spectrum[0] * 20.0 + params.spectrum[4] * 30.0 + params.spectrum[7] * 40.0;
-                float hue1 = value * 360.0 + params.time * 30.0 + params.frequency * 100.0 + zoomColorShift + spectrumColorShift;
-                float baseBrightness = 0.3 + (0.5 + audioMod * 0.2) * (1.0 - value) + params.highEnergy * 0.2;
-                float3 color1 = hsv2rgb(float3(hue1 / 360.0, 0.8 + audioMod * 0.2, baseBrightness));
+                float hue1 = edgeFactor * 240.0 + complexity * 120.0 + params.time * 30.0 + params.frequency * 100.0 + zoomColorShift + spectrumColorShift;
+                float baseBrightness = 0.2 + edgeFactor * 0.7 + params.highEnergy * 0.2;
+                float3 color1 = hsv2rgb(float3(hue1 / 360.0, 0.7 + audioMod * 0.3, baseBrightness));
                 
                 // Orbit trap based coloring for interior detail
                 float trapInfluence = 1.0 / (1.0 + orbitTrapValue * 10.0);
@@ -382,9 +383,10 @@ struct MandelbrotView: NSViewRepresentable {
                     particleEffect = exp(-particleDist * 20.0) * audioMod * 0.3;
                 }
                 
-                // Blend all color layers
+                // Blend all color layers and emphasise boundary detail
                 float3 baseColor = mix(color1, color2, complexity * 0.3);
                 float3 finalColor = mix(baseColor, trapColor, trapInfluence * 0.4) * shimmer * dynamicNoise;
+                finalColor = mix(color1, finalColor, edgeFactor);
                 
                 // Add particle highlights
                 float3 particleColor = float3(1.0, 0.8, 0.4) * particleEffect;
